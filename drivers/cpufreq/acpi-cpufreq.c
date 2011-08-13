@@ -972,7 +972,7 @@ static ssize_t store_freq_attr_vids(struct cpufreq_policy *policy, const char *b
 		 */
 		if (new_vid <= original_vid) {
 			new_control = (original_control & ~INTEL_MSR_VID_MASK) | new_vid;
-			dprintk("setting control at %i to %x (default is %x)\n",
+			pr_debug("setting control at %i to %x (default is %x)\n",
 				freq_index, new_control, original_control);
 			acpi_data->states[state_index].control = new_control;
 
@@ -1065,7 +1065,7 @@ static ssize_t store_freq_attr_controls(struct cpufreq_policy *policy, const cha
 							if (new_vid <= original_vid)
 							{
 								new_control = (original_control & ~INTEL_MSR_VID_MASK) | new_vid;
-								dprintk("setting control at %i to %x (default is %x)\n",
+								pr_debug("setting control at %i to %x (default is %x)\n",
 									state_index, new_control, original_control);
 								acpi_data->states[state_index].control = new_control;
 
