@@ -884,3 +884,12 @@ _output_error:
     return (int) (-(((char*)ip)-source));
 }
 
+int LZ4_context_size(void)
+{
+	return sizeof(struct refTables);
+}
+int LZ4_context64k_size(void)
+{
+	return sizeof(struct refTables);
+}
+

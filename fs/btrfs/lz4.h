@@ -142,6 +142,9 @@ int LZ4_compress64kCtx(void** ctx,
 				 char* dest,
 				 int isize);
 
+int LZ4_context_size(void);
+int LZ4_context64k_size(void);
+
 #if defined (__cplusplus)
 }
 #endif
