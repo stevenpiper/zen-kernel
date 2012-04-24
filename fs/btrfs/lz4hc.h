@@ -54,6 +54,13 @@ LZ4_compressHC :
 Decompression functions are provided within regular LZ4 source code (see "lz4.h") (BSD license)
 */
 
+int LZ4_compressHCCtx(void* ctx,
+				 const char* source, 
+				 char* dest,
+				 int isize);
+
+int LZ4_contextHC_size(void);
+void LZ4_contextHC_init(void *ctx, const void *base);
 
 #if defined (__cplusplus)
 }

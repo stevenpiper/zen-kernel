@@ -76,7 +76,7 @@
 //**************************************
 // Compiler Options
 //**************************************
-#if __STDC_VERSION__ >= 199901L    // C99
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L    // C99
   /* "restrict" is a known keyword */
 #else
 #  define restrict  // Disable restrict
@@ -111,9 +111,17 @@
 //**************************************
 // Includes
 //**************************************
+#ifdef __KERNEL__
+#include <linux/string.h>
+#include <linux/bug.h>
+#define calloc(x,size)	({ BUG(); (void*)0; })
+#define malloc(size)	({ BUG(); (void*)0; })
+#define free(ptr)	({ BUG(); (void*)0; })
+#else
 #include <stdlib.h>   // calloc, free
 #include <string.h>   // memset, memcpy
 #include "lz4hc.h"
+#endif
 
 #define ALLOCATOR(s) calloc(1,s)
 #define FREEMEM free
@@ -130,12 +138,23 @@
 #define S32		__int32
 #define U64		unsigned __int64
 #else
+#ifdef __KERNEL__
+#include <asm/byteorder.h>
+#include <linux/types.h>
+#define BYTE	u8
+#define U16	u16
+#define U32	u32
+#define S32	s32
+#define U64	u64
+
+#else
 #include <stdint.h>
 #define BYTE	uint8_t
 #define U16		uint16_t
 #define U32		uint32_t
 #define S32		int32_t
 #define U64		uint64_t
+#endif // __KERNEL__
 #endif
 
 #ifndef LZ4_FORCE_UNALIGNED_ACCESS
@@ -733,6 +752,16 @@ int LZ4_compressHC(const char* source,
     LZ4HC_Free (&ctx);
 
     return result;
+}
+
+int LZ4_contextHC_size(void)
+{
+	return sizeof(LZ4HC_Data_Structure);
+}
+
+void LZ4_contextHC_init(void *ctx, const void *base)
+{
+	LZ4HC_Init(ctx, base);
 }
 
 
