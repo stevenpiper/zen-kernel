@@ -1304,7 +1304,8 @@ int btrfs_defrag_file(struct inode *inode, struct file *file,
 	if (range->compress_type == BTRFS_COMPRESS_LZO) {
 		btrfs_set_fs_incompat(root->fs_info, COMPRESS_LZO);
 	}
-	if (range->compress_type == BTRFS_COMPRESS_LZ4) {
+	if (range->compress_type == BTRFS_COMPRESS_LZ4 ||
+	    range->compress_type == BTRFS_COMPRESS_LZ4HC) {
 		features |= BTRFS_FEATURE_INCOMPAT_COMPRESSION_LZ4;
 		btrfs_set_super_incompat_flags(disk_super, features);
 	}
