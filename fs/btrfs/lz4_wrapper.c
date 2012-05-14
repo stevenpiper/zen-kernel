@@ -24,6 +24,7 @@
 #include <linux/sched.h>
 #include <linux/pagemap.h>
 #include <linux/bio.h>
+#include <asm/unaligned.h>
 #include "lz4.h"
 #include "lz4hc.h"
 #include "compression.h"
@@ -108,8 +109,140 @@ static inline size_t read_compress_length(char *buf)
 	memcpy(&dlen, buf, LZ4_LEN);
 	return le32_to_cpu(dlen);
 }
+static int lz4_compress_pages_v0(struct list_head *ws,
+			      struct address_space *mapping,
+			      u64 start, unsigned long len,
+			      struct page **pages,
+			      unsigned long nr_dest_pages,
+			      unsigned long *out_pages,
+			      unsigned long *total_in,
+			      unsigned long *total_out,
+			      unsigned long max_out);
+
+struct compress_header_v0 {
+	__le32 bytes_compressed;
+};
+struct compress_header_v1 {
+	/* 1M length max */
+	__le32 comp_len; /* at most 20 bits, 30-31 bits: version */
+	__le32 orig_len; /* at most 20 bits */
+};
+
+#define COUNT_PAGES(length)	(PAGE_CACHE_ALIGN((length)) >> PAGE_CACHE_SHIFT)
 
 static int lz4_compress_pages(struct list_head *ws,
+			      struct address_space *mapping,
+			      u64 start, unsigned long len,
+			      struct page **pages,
+			      unsigned long nr_dest_pages,
+			      unsigned long *out_pages,
+			      unsigned long *total_in,
+			      unsigned long *total_out,
+			      unsigned long max_out)
+{
+	/*
+	 * Simplest strategy for large compression chunk support:
+	 * - vmap input pages into contiguous area
+	 * - preallocate desired number of output pages
+	 * - vmap the output pages
+	 * - compress
+	 * - vunmap input, output
+	 * - ???
+	 * - PROFIT
+	 */
+	struct workspace *workspace = list_entry(ws, struct workspace, list);
+	struct compress_header_v1 hdr = { 0, 0};
+	int nr_in_pages = PAGE_CACHE_ALIGN(len) >> PAGE_CACHE_SHIFT;
+	/* FIXME: wasteful by 1 page up to 512k */
+	unsigned long nr_out_pages = COUNT_PAGES(LZ4_compressBound(len + sizeof(hdr)));
+	/* Maximum of 1M chunk: 4096 / 2 / 8 * 4096 */
+	struct page **in_vmap = (struct page**)workspace->buf;
+	struct page **out_vmap = (void*)in_vmap + PAGE_CACHE_SIZE / 2;
+	char *data_in;
+	char *data_out;
+	char *data_out_start;
+	int i;
+	int ret;
+	unsigned out_len;
+
+	{static int xxx=0;if(!xxx){xxx=1;printk(KERN_DEBUG "lz4: using vmap, max_out %ld\n", max_out);}}
+
+	ret = find_get_pages_contig(mapping, start >> PAGE_CACHE_SHIFT,
+			nr_in_pages, in_vmap);
+	BUG_ON(ret != nr_in_pages);
+	data_in = vmap(in_vmap, nr_in_pages, VM_MAP, PAGE_KERNEL);
+	BUG_ON(!data_in);
+
+	for (i = 0; i < nr_out_pages; i++) {
+		out_vmap[i] = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
+		BUG_ON(!out_vmap[i]);
+	}
+	data_out = vmap(out_vmap, nr_out_pages, VM_MAP, PAGE_KERNEL);
+	BUG_ON(!data_out);
+	data_out_start = data_out + sizeof(struct compress_header_v1);
+
+	if (len < 64 * 1024) {
+		out_len = LZ4_compress64kCtx(&workspace->mem, data_in,
+				data_out_start, len);
+		if (out_len < 0) {
+			printk(KERN_ERR "btrfs: lz4 compression 64k error\n");
+			BUG();
+		}
+	} else {
+		out_len = LZ4_compressCtx(&workspace->mem, data_in,
+				data_out_start, len);
+		if (out_len < 0) {
+			printk(KERN_ERR "btrfs: lz4 compression error\n");
+			BUG();
+		}
+	}
+
+	/* Version marker, highest bits are 0100... */
+	put_unaligned_le32(1 << 30 | out_len, &hdr.comp_len);
+	put_unaligned_le32(len, &hdr.orig_len);
+	memcpy(data_out, &hdr, sizeof(hdr));
+
+	*total_out = out_len + sizeof(hdr);
+	*total_in = len;
+	*out_pages = COUNT_PAGES(*total_out);
+
+	ret = 0;
+	if (*out_pages > nr_dest_pages) {
+		printk(KERN_DEBUG "lz4: pg_out %lu > %lu nr_dest, nr_out %lu; len %lu out_len %u hdr %lu, ino %lu\n",
+				*out_pages, nr_dest_pages, nr_out_pages,
+				len, out_len, sizeof(hdr),
+				mapping->host->i_ino
+				);
+		printk(KERN_DEBUG "... kick the bucket\n");
+		vunmap(data_in);
+		for (i = 0; i < nr_in_pages; i++)
+			page_cache_release(in_vmap[i]);
+		vunmap(data_out);
+		for (i = 0; i < *out_pages; i++)
+			page_cache_release(out_vmap[i]);
+		*out_pages = 0;
+		return -1;
+	}
+
+	vunmap(data_in);
+	for (i = 0; i < nr_in_pages; i++)
+		page_cache_release(in_vmap[i]);
+
+	vunmap(data_out);
+	for (i = 0; i < min(*out_pages, nr_dest_pages); i++)
+		pages[i] = out_vmap[i];
+	for (; i < nr_out_pages; i++)
+		__free_pages(out_vmap[i], 0);
+
+	return ret;
+
+	/**************************************************/
+	return lz4_compress_pages_v0(ws, mapping, start, len, pages,
+			nr_dest_pages, out_pages, total_in, total_out,
+			max_out);
+}
+
+static int lz4_compress_pages_v0(struct list_head *ws,
 			      struct address_space *mapping,
 			      u64 start, unsigned long len,
 			      struct page **pages,
@@ -477,9 +610,49 @@ static int lz4_decompress_biovec(struct list_head *ws,
 	char *buf;
 	bool may_late_unmap, need_unmap;
 
+	struct page **out_vmap = (struct page**)workspace->buf;
+	struct compress_header_v1 hdr;
+	char *data_in_start;
+	char *data_out;
+	int i;
+
 	data_in = kmap(pages_in[0]);
 	tot_len = read_compress_length(data_in);
 
+	if (tot_len <= 128 * 1024) {
+		goto found_v0_container;
+	}
+	if (tot_len >> 30 != 1) {
+		printk(KERN_ERR "btrfs: lz4 unknown container version found\n");
+		BUG();
+	}
+	hdr.comp_len = get_unaligned_le32(data_in);
+	hdr.orig_len = get_unaligned_le32(data_in + sizeof(u32));
+	kunmap(pages_in[0]);
+	data_in = vmap(pages_in, total_pages_in, VM_MAP, PAGE_KERNEL);
+	data_in_start = data_in + sizeof(hdr);
+
+	for (i = 0; i < vcnt; i++)
+		out_vmap[i] = bvec[i].bv_page;
+
+	data_out = vmap(out_vmap, PAGE_CACHE_ALIGN(hdr.orig_len) >> PAGE_CACHE_SHIFT,
+			VM_MAP, PAGE_KERNEL);
+	BUG_ON(!data_out);
+
+	out_len = LZ4_uncompress(data_in_start, data_out, hdr.orig_len);
+	if (out_len < 0) {
+		printk(KERN_ERR "btrfs: lz4 decompress error\n");
+		BUG();
+	}
+
+	for (i = 0; i < vcnt; i++)
+		flush_dcache_page(bvec[i].bv_page);
+	vunmap(data_in);
+	vunmap(data_out);
+
+	return 0;
+
+found_v0_container:
 	tot_in = LZ4_LEN;
 	in_offset = LZ4_LEN;
 	tot_len = min_t(size_t, srclen, tot_len);
@@ -585,13 +758,23 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 	BUG_ON(srclen < LZ4_LEN);
 
 	tot_len = read_compress_length(data_in);
-	data_in += LZ4_LEN;
+	if (tot_len < 128 * 1024) {
+		data_in += LZ4_LEN;
+		in_len = read_compress_length(data_in);
+		data_in += LZ4_LEN;
 
-	in_len = read_compress_length(data_in);
-	data_in += LZ4_LEN;
+		out_len = LZ4_uncompress_unknownOutputSize(data_in, workspace->buf,
+				in_len, LZ4_CHUNK_SIZE);
+	} else {
+		if (tot_len >> 30 != 1) {
+			printk(KERN_ERR "btrfs: lz4 unknown container version found\n");
+			BUG();
+		}
+		/* TODO: hdr? */
+		in_len = get_unaligned_le32(data_in + sizeof(u32));
+		out_len = LZ4_uncompress(data_in, workspace->buf, in_len);
+	}
 
-	out_len = LZ4_uncompress_unknownOutputSize(data_in, workspace->buf,
-			in_len, LZ4_CHUNK_SIZE);
 	if (out_len < 0) {
 		printk(KERN_WARNING "btrfs: lz4 decompress failed\n");
 		ret = -1;
@@ -605,9 +788,9 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 
 	bytes = min_t(unsigned long, destlen, out_len - start_byte);
 
-	kaddr = kmap_atomic(dest_page, KM_USER0);
+	kaddr = kmap_atomic(dest_page);
 	memcpy(kaddr, workspace->buf + start_byte, bytes);
-	kunmap_atomic(kaddr, KM_USER0);
+	kunmap_atomic(kaddr);
 out:
 	return ret;
 }
