@@ -1937,17 +1937,18 @@ struct frontswap_ops zcache_frontswap_register_ops(void)
 
 /*
  * zcache initialization
- * allow disabling the module
+ * NOTE FOR NOW zcache MUST BE PROVIDED AS A KERNEL BOOT PARAMETER OR
+ * NOTHING HAPPENS!
  */
 
-static int zcache_enabled = 1;
+static int zcache_enabled;
 
-static int __init no_zcache(char *s)
+static int __init enable_zcache(char *s)
 {
-	zcache_enabled = 0;
+	zcache_enabled = 1;
 	return 1;
 }
-__setup("nozcache", no_zcache);
+__setup("zcache", enable_zcache);
 
 /* allow independent dynamic disabling of cleancache and frontswap */
 
