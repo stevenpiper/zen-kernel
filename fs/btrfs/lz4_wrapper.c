@@ -50,7 +50,7 @@ static void lz4_free_workspace(struct list_head *ws)
 	kfree(workspace);
 }
 
-static struct list_head *lz4_alloc_workspace(void)
+static struct list_head *lz4_alloc_workspace_generic(int hi)
 {
 	struct workspace *workspace;
 
@@ -58,7 +58,10 @@ static struct list_head *lz4_alloc_workspace(void)
 	if (!workspace)
 		return ERR_PTR(-ENOMEM);
 
-	workspace->mem = vmalloc(LZ4_context64k_size());
+	if (hi)
+		workspace->mem = vmalloc(LZ4_contextHC_size());
+	else
+		workspace->mem = vmalloc(LZ4_context64k_size());
 	workspace->buf = vmalloc(LZ4_MAX_WORKBUF);
 	workspace->cbuf = vmalloc(LZ4_MAX_WORKBUF);
 	if (!workspace->mem || !workspace->buf || !workspace->cbuf)
@@ -72,26 +75,14 @@ fail:
 	return ERR_PTR(-ENOMEM);
 }
 
+static struct list_head *lz4_alloc_workspace(void)
+{
+	return lz4_alloc_workspace_generic(0);
+}
+
 static struct list_head *lz4hc_alloc_workspace(void)
 {
-	struct workspace *workspace;
-
-	workspace = kzalloc(sizeof(*workspace), GFP_NOFS);
-	if (!workspace)
-		return ERR_PTR(-ENOMEM);
-
-	workspace->mem = vmalloc(LZ4_contextHC_size());
-	workspace->buf = vmalloc(LZ4_MAX_WORKBUF);
-	workspace->cbuf = vmalloc(LZ4_MAX_WORKBUF);
-	if (!workspace->mem || !workspace->buf || !workspace->cbuf)
-		goto fail;
-
-	INIT_LIST_HEAD(&workspace->list);
-
-	return &workspace->list;
-fail:
-	lz4_free_workspace(&workspace->list);
-	return ERR_PTR(-ENOMEM);
+	return lz4_alloc_workspace_generic(1);
 }
 
 static inline void write_compress_length(char *buf, size_t len)
@@ -117,7 +108,7 @@ static int lz4_compress_pages_v0(struct list_head *ws,
 			      unsigned long *out_pages,
 			      unsigned long *total_in,
 			      unsigned long *total_out,
-			      unsigned long max_out);
+			      unsigned long max_out, int hi);
 
 struct compress_header_v0 {
 	__le32 bytes_compressed;
@@ -130,7 +121,7 @@ struct compress_header_v1 {
 
 #define COUNT_PAGES(length)	(PAGE_CACHE_ALIGN((length)) >> PAGE_CACHE_SHIFT)
 
-static int lz4_compress_pages(struct list_head *ws,
+static int lz4_compress_pages_generic(struct list_head *ws,
 			      struct address_space *mapping,
 			      u64 start, unsigned long len,
 			      struct page **pages,
@@ -138,7 +129,7 @@ static int lz4_compress_pages(struct list_head *ws,
 			      unsigned long *out_pages,
 			      unsigned long *total_in,
 			      unsigned long *total_out,
-			      unsigned long max_out)
+			      unsigned long max_out, int hi)
 {
 	/*
 	 * Simplest strategy for large compression chunk support:
@@ -181,7 +172,15 @@ static int lz4_compress_pages(struct list_head *ws,
 	BUG_ON(!data_out);
 	data_out_start = data_out + sizeof(struct compress_header_v1);
 
-	if (len < 64 * 1024) {
+	if (hi) {
+		LZ4_contextHC_init(workspace->mem, data_in);
+		out_len = LZ4_compressHCCtx(workspace->mem, data_in,
+				data_out_start, len);
+		if (out_len < 0) {
+			printk(KERN_ERR "btrfs: lz4 compression HC error\n");
+			BUG();
+		}
+	} else if (len < 64 * 1024) {
 		out_len = LZ4_compress64kCtx(&workspace->mem, data_in,
 				data_out_start, len);
 		if (out_len < 0) {
@@ -239,7 +238,7 @@ static int lz4_compress_pages(struct list_head *ws,
 	/**************************************************/
 	return lz4_compress_pages_v0(ws, mapping, start, len, pages,
 			nr_dest_pages, out_pages, total_in, total_out,
-			max_out);
+			max_out, hi);
 }
 
 static int lz4_compress_pages_v0(struct list_head *ws,
@@ -250,7 +249,7 @@ static int lz4_compress_pages_v0(struct list_head *ws,
 			      unsigned long *out_pages,
 			      unsigned long *total_in,
 			      unsigned long *total_out,
-			      unsigned long max_out)
+			      unsigned long max_out, int hi)
 {
 	struct workspace *workspace = list_entry(ws, struct workspace, list);
 	int ret = 0;
@@ -296,8 +295,14 @@ static int lz4_compress_pages_v0(struct list_head *ws,
 	/* compress at most one page of data each time */
 	in_len = min(len, PAGE_CACHE_SIZE);
 	while (tot_in < len) {
-		out_len = LZ4_compress64kCtx(&workspace->mem, data_in,
-				workspace->cbuf, in_len);
+		if (hi) {
+			LZ4_contextHC_init(workspace->mem, data_in);
+			out_len = LZ4_compressHCCtx(workspace->mem, data_in,
+					workspace->cbuf, in_len);
+		} else {
+			out_len = LZ4_compress64kCtx(&workspace->mem, data_in,
+					workspace->cbuf, in_len);
+		}
 		if (out_len <= 0) {
 			printk(KERN_DEBUG
 				"btrfs: lz4 compress in loop returned %d\n",
@@ -410,6 +415,22 @@ out:
 
 	return ret;
 }
+
+static int lz4_compress_pages(struct list_head *ws,
+			      struct address_space *mapping,
+			      u64 start, unsigned long len,
+			      struct page **pages,
+			      unsigned long nr_dest_pages,
+			      unsigned long *out_pages,
+			      unsigned long *total_in,
+			      unsigned long *total_out,
+			      unsigned long max_out)
+{
+	return lz4_compress_pages_generic(ws, mapping, start, len, pages,
+				nr_dest_pages, out_pages, total_in, total_out,
+				max_out, 0);
+}
+
 static int lz4hc_compress_pages(struct list_head *ws,
 			      struct address_space *mapping,
 			      u64 start, unsigned long len,
@@ -420,164 +441,9 @@ static int lz4hc_compress_pages(struct list_head *ws,
 			      unsigned long *total_out,
 			      unsigned long max_out)
 {
-	struct workspace *workspace = list_entry(ws, struct workspace, list);
-	int ret = 0;
-	char *data_in;
-	char *cpage_out;
-	int nr_pages = 0;
-	struct page *in_page = NULL;
-	struct page *out_page = NULL;
-	unsigned long bytes_left;
-
-	size_t in_len;
-	size_t out_len;
-	char *buf;
-	unsigned long tot_in = 0;
-	unsigned long tot_out = 0;
-	unsigned long pg_bytes_left;
-	unsigned long out_offset;
-	unsigned long bytes;
-
-	*out_pages = 0;
-	*total_out = 0;
-	*total_in = 0;
-
-	in_page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
-	data_in = kmap(in_page);
-
-	/*
-	 * store the size of all chunks of compressed data in
-	 * the first 4 bytes
-	 */
-	out_page = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
-	if (out_page == NULL) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	cpage_out = kmap(out_page);
-	out_offset = LZ4_LEN;
-	tot_out = LZ4_LEN;
-	pages[0] = out_page;
-	nr_pages = 1;
-	pg_bytes_left = PAGE_CACHE_SIZE - LZ4_LEN;
-
-	/* compress at most one page of data each time */
-	in_len = min(len, PAGE_CACHE_SIZE);
-	while (tot_in < len) {
-		LZ4_contextHC_init(workspace->mem, data_in);
-		out_len = LZ4_compressHCCtx(workspace->mem, data_in,
-				workspace->cbuf, in_len);
-		if (out_len <= 0) {
-			printk(KERN_DEBUG
-				"btrfs: lz4hc compress in loop returned %d\n",
-			       ret);
-			ret = -1;
-			goto out;
-		}
-
-		/* store the size of this chunk of compressed data */
-		write_compress_length(cpage_out + out_offset, out_len);
-		tot_out += LZ4_LEN;
-		out_offset += LZ4_LEN;
-		pg_bytes_left -= LZ4_LEN;
-
-		tot_in += in_len;
-		tot_out += out_len;
-
-		/* copy bytes from the working buffer into the pages */
-		buf = workspace->cbuf;
-		while (out_len) {
-			bytes = min_t(unsigned long, pg_bytes_left, out_len);
-
-			memcpy(cpage_out + out_offset, buf, bytes);
-
-			out_len -= bytes;
-			pg_bytes_left -= bytes;
-			buf += bytes;
-			out_offset += bytes;
-
-			/*
-			 * we need another page for writing out.
-			 *
-			 * Note if there's less than 4 bytes left, we just
-			 * skip to a new page.
-			 */
-			if ((out_len == 0 && pg_bytes_left < LZ4_LEN) ||
-			    pg_bytes_left == 0) {
-				if (pg_bytes_left) {
-					memset(cpage_out + out_offset, 0,
-					       pg_bytes_left);
-					tot_out += pg_bytes_left;
-				}
-
-				/* we're done, don't allocate new page */
-				if (out_len == 0 && tot_in >= len)
-					break;
-
-				kunmap(out_page);
-				if (nr_pages == nr_dest_pages) {
-					out_page = NULL;
-					ret = -1;
-					goto out;
-				}
-
-				out_page = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
-				if (out_page == NULL) {
-					ret = -ENOMEM;
-					goto out;
-				}
-				cpage_out = kmap(out_page);
-				pages[nr_pages++] = out_page;
-
-				pg_bytes_left = PAGE_CACHE_SIZE;
-				out_offset = 0;
-			}
-		}
-
-		/* we're making it bigger, give up */
-		if (tot_in > 8192 && tot_in < tot_out)
-			goto out;
-
-		/* we're all done */
-		if (tot_in >= len)
-			break;
-
-		if (tot_out > max_out)
-			break;
-
-		bytes_left = len - tot_in;
-		kunmap(in_page);
-		page_cache_release(in_page);
-
-		start += PAGE_CACHE_SIZE;
-		in_page = find_get_page(mapping, start >> PAGE_CACHE_SHIFT);
-		data_in = kmap(in_page);
-		in_len = min(bytes_left, PAGE_CACHE_SIZE);
-	}
-
-	if (tot_out > tot_in)
-		goto out;
-
-	/* store the size of all chunks of compressed data */
-	cpage_out = kmap(pages[0]);
-	write_compress_length(cpage_out, tot_out);
-
-	kunmap(pages[0]);
-
-	ret = 0;
-	*total_out = tot_out;
-	*total_in = tot_in;
-out:
-	*out_pages = nr_pages;
-	if (out_page)
-		kunmap(out_page);
-
-	if (in_page) {
-		kunmap(in_page);
-		page_cache_release(in_page);
-	}
-
-	return ret;
+	return lz4_compress_pages_generic(ws, mapping, start, len, pages,
+				nr_dest_pages, out_pages, total_in, total_out,
+				max_out, 1);
 }
 
 static int lz4_decompress_biovec(struct list_head *ws,
