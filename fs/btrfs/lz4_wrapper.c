@@ -24,6 +24,7 @@
 #include <linux/sched.h>
 #include <linux/pagemap.h>
 #include <linux/bio.h>
+#include <linux/highmem.h>
 #include <asm/unaligned.h>
 #include "lz4.h"
 #include "lz4hc.h"
@@ -171,6 +172,7 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 	data_out = vmap(out_vmap, nr_out_pages, VM_MAP, PAGE_KERNEL);
 	BUG_ON(!data_out);
 	data_out_start = data_out + sizeof(struct compress_header_v1);
+	invalidate_kernel_vmap_range(data_in, nr_in_pages << PAGE_CACHE_SHIFT);
 
 	if (hi) {
 		LZ4_contextHC_init(workspace->mem, data_in);
@@ -216,6 +218,7 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 		vunmap(data_in);
 		for (i = 0; i < nr_in_pages; i++)
 			page_cache_release(in_vmap[i]);
+		flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
 		vunmap(data_out);
 		for (i = 0; i < *out_pages; i++)
 			page_cache_release(out_vmap[i]);
@@ -227,6 +230,7 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 	for (i = 0; i < nr_in_pages; i++)
 		page_cache_release(in_vmap[i]);
 
+	flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
 	vunmap(data_out);
 	for (i = 0; i < min(*out_pages, nr_dest_pages); i++)
 		pages[i] = out_vmap[i];
@@ -496,6 +500,7 @@ static int lz4_decompress_biovec(struct list_head *ws,
 	hdr.orig_len = get_unaligned_le32(data_in + sizeof(u32));
 	kunmap(pages_in[0]);
 	data_in = vmap(pages_in, total_pages_in, VM_MAP, PAGE_KERNEL);
+	invalidate_kernel_vmap_range(data_in, total_pages_in << PAGE_CACHE_SHIFT);
 	data_in_start = data_in + sizeof(hdr);
 
 	for (i = 0; i < vcnt; i++)
@@ -511,6 +516,7 @@ static int lz4_decompress_biovec(struct list_head *ws,
 		BUG();
 	}
 
+	flush_kernel_vmap_range(data_out, COUNT_PAGES(hdr.orig_len) << PAGE_CACHE_SHIFT);
 	for (i = 0; i < vcnt; i++)
 		flush_dcache_page(bvec[i].bv_page);
 	vunmap(data_in);
