@@ -1407,13 +1407,13 @@ can_preempt(struct task_struct *p, int prio, u64 deadline)
 }
 
 #ifdef CONFIG_SMP
+#define cpu_online_map		(*(cpumask_t *)cpu_online_mask)
 #ifdef CONFIG_HOTPLUG_CPU
 /*
  * Check to see if there is a task that is affined only to offline CPUs but
  * still wants runtime. This happens to kernel threads during suspend/halt and
  * disabling of CPUs.
  */
-#define cpu_online_map		(*(cpumask_t *)cpu_online_mask)
 static inline bool online_cpus(struct task_struct *p)
 {
 	return (likely(cpus_intersects(cpu_online_map, p->cpus_allowed)));
