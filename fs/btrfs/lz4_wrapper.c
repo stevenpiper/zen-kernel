@@ -161,16 +161,34 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 
 	ret = find_get_pages_contig(mapping, start >> PAGE_CACHE_SHIFT,
 			nr_in_pages, in_vmap);
-	BUG_ON(ret != nr_in_pages);
+	if (ret != nr_in_pages) {
+		printk(KERN_WARNING "btrfs: failed to find all input pages for lz4 compression\n");
+		return -1;
+	}
 	data_in = vmap(in_vmap, nr_in_pages, VM_MAP, PAGE_KERNEL);
-	BUG_ON(!data_in);
+	if (!data_in) {
+		printk(KERN_WARNING "btrfs: vmap for lz4 compression input buffer failed.\n");
+		return -ENOMEM;
+	}
+
 
 	for (i = 0; i < nr_out_pages; i++) {
 		out_vmap[i] = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
-		BUG_ON(!out_vmap[i]);
+		if (!out_vmap[i]) {
+			vunmap(data_in);
+			printk(KERN_WARNING "btrfs: alloc_page for lz4 compression output buffer failed\n");
+			ret = -ENOMEM;
+			goto free_out_pages;
+		}
+
 	}
 	data_out = vmap(out_vmap, nr_out_pages, VM_MAP, PAGE_KERNEL);
-	BUG_ON(!data_out);
+	if (!data_out) {
+		vunmap(data_in);
+		printk(KERN_WARNING "btrfs: vmap for lz4 compression output buffer failed.\n");
+		ret = -ENOMEM;
+		goto free_out_pages;
+	}
 	data_out_start = data_out + sizeof(struct compress_header_v1);
 	invalidate_kernel_vmap_range(data_in, nr_in_pages << PAGE_CACHE_SHIFT);
 
@@ -180,21 +198,33 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 				data_out_start, len);
 		if (out_len < 0) {
 			printk(KERN_ERR "btrfs: lz4 compression HC error\n");
-			BUG();
+			ret = -1;
+			flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
+			vunmap(data_in);
+			vunmap(data_out);
+			goto free_out_pages;
 		}
 	} else if (len < 64 * 1024) {
 		out_len = LZ4_compress64kCtx(&workspace->mem, data_in,
 				data_out_start, len);
 		if (out_len < 0) {
 			printk(KERN_ERR "btrfs: lz4 compression 64k error\n");
-			BUG();
+			ret = -1;
+			flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
+			vunmap(data_in);
+			vunmap(data_out);
+			goto free_out_pages;
 		}
 	} else {
 		out_len = LZ4_compressCtx(&workspace->mem, data_in,
 				data_out_start, len);
 		if (out_len < 0) {
 			printk(KERN_ERR "btrfs: lz4 compression error\n");
-			BUG();
+			ret = -1;
+			flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
+			vunmap(data_in);
+			vunmap(data_out);
+			goto free_out_pages;
 		}
 	}
 
@@ -220,10 +250,8 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 			page_cache_release(in_vmap[i]);
 		flush_kernel_vmap_range(data_out, nr_out_pages << PAGE_CACHE_SHIFT);
 		vunmap(data_out);
-		for (i = 0; i < *out_pages; i++)
-			page_cache_release(out_vmap[i]);
-		*out_pages = 0;
-		return -1;
+		ret = -1;
+		goto free_out_pages;
 	}
 
 	vunmap(data_in);
@@ -238,6 +266,16 @@ static int lz4_compress_pages_generic(struct list_head *ws,
 		__free_pages(out_vmap[i], 0);
 
 	return ret;
+
+free_out_pages:
+	for (i = 0; i < nr_out_pages; i++)
+		if(out_vmap[i])
+			page_cache_release(out_vmap[i]);
+		else
+			break;
+	*out_pages = 0;
+	return ret;
+	
 
 	/**************************************************/
 	return lz4_compress_pages_v0(ws, mapping, start, len, pages,
@@ -494,12 +532,16 @@ static int lz4_decompress_biovec(struct list_head *ws,
 	}
 	if (tot_len >> 30 != 1) {
 		printk(KERN_ERR "btrfs: lz4 unknown container version found\n");
-		BUG();
+		return -EIO;
 	}
 	hdr.comp_len = get_unaligned_le32(data_in);
 	hdr.orig_len = get_unaligned_le32(data_in + sizeof(u32));
 	kunmap(pages_in[0]);
 	data_in = vmap(pages_in, total_pages_in, VM_MAP, PAGE_KERNEL);
+	if (!data_in) {
+		printk(KERN_WARNING "btrfs: vmap for lz4 decompression output buffer failed.\n");
+		return -ENOMEM;
+	}
 	invalidate_kernel_vmap_range(data_in, total_pages_in << PAGE_CACHE_SHIFT);
 	data_in_start = data_in + sizeof(hdr);
 
@@ -508,17 +550,24 @@ static int lz4_decompress_biovec(struct list_head *ws,
 
 	data_out = vmap(out_vmap, PAGE_CACHE_ALIGN(hdr.orig_len) >> PAGE_CACHE_SHIFT,
 			VM_MAP, PAGE_KERNEL);
-	BUG_ON(!data_out);
+	if (!data_out) {
+		vunmap(data_in);
+		printk(KERN_WARNING "btrfs: vmap for lz4 decompression output buffer failed.\n");
+		return -ENOMEM;
+	}
 
 	out_len = LZ4_uncompress(data_in_start, data_out, hdr.orig_len);
-	if (out_len < 0) {
-		printk(KERN_ERR "btrfs: lz4 decompress error\n");
-		BUG();
-	}
 
 	flush_kernel_vmap_range(data_out, COUNT_PAGES(hdr.orig_len) << PAGE_CACHE_SHIFT);
 	for (i = 0; i < vcnt; i++)
 		flush_dcache_page(bvec[i].bv_page);
+
+	if (out_len < 0) {
+		vunmap(data_in);
+		vunmap(data_out);
+		printk(KERN_ERR "btrfs: lz4 decompress error\n");
+		return -EIO;
+	}
 	vunmap(data_in);
 	vunmap(data_out);
 
@@ -627,7 +676,8 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 	char *kaddr;
 	unsigned long bytes;
 
-	BUG_ON(srclen < LZ4_LEN);
+	if (srclen < LZ4_LEN)
+		return -EIO;
 
 	tot_len = read_compress_length(data_in);
 	if (tot_len < 128 * 1024) {
@@ -640,7 +690,7 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 	} else {
 		if (tot_len >> 30 != 1) {
 			printk(KERN_ERR "btrfs: lz4 unknown container version found\n");
-			BUG();
+			return -EIO;
 		}
 		/* TODO: hdr? */
 		in_len = get_unaligned_le32(data_in + sizeof(u32));
