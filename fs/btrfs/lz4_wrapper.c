@@ -519,10 +519,11 @@ static int lz4_decompress_biovec(struct list_head *ws,
 	bool may_late_unmap, need_unmap;
 
 	struct page **out_vmap = (struct page**)workspace->buf;
+	struct page **extra_pages = (void *)out_vmap + PAGE_CACHE_SIZE / 2;
 	struct compress_header_v1 hdr;
 	char *data_in_start;
 	char *data_out;
-	int i;
+	int i, j, extra_pages_used;
 
 	data_in = kmap(pages_in[0]);
 	tot_len = read_compress_length(data_in);
@@ -545,10 +546,19 @@ static int lz4_decompress_biovec(struct list_head *ws,
 	invalidate_kernel_vmap_range(data_in, total_pages_in << PAGE_CACHE_SHIFT);
 	data_in_start = data_in + sizeof(hdr);
 
-	for (i = 0; i < vcnt; i++)
-		out_vmap[i] = bvec[i].bv_page;
+	extra_pages_used = 0; j = 0;
+	for (i = 0; i < COUNT_PAGES(hdr.orig_len); i++) {
+		if (j < vcnt && page_offset(bvec[j].bv_page) - disk_start == i << PAGE_CACHE_SHIFT) {
+			out_vmap[i] = bvec[j].bv_page;
+			j++;
+		} else {
+			out_vmap[i] = alloc_page(GFP_NOFS | __GFP_HIGHMEM);
+			extra_pages[extra_pages_used++] = out_vmap[i];
+		}
+		BUG_ON(!out_vmap[i]);
+	}
 
-	data_out = vmap(out_vmap, PAGE_CACHE_ALIGN(hdr.orig_len) >> PAGE_CACHE_SHIFT,
+	data_out = vmap(out_vmap, COUNT_PAGES(hdr.orig_len),
 			VM_MAP, PAGE_KERNEL);
 	if (!data_out) {
 		vunmap(data_in);
@@ -558,7 +568,9 @@ static int lz4_decompress_biovec(struct list_head *ws,
 
 	out_len = LZ4_uncompress(data_in_start, data_out, hdr.orig_len);
 
-	flush_kernel_vmap_range(data_out, COUNT_PAGES(hdr.orig_len) << PAGE_CACHE_SHIFT);
+	flush_kernel_vmap_range(data_out, hdr.orig_len);
+	for (i = 0; i < extra_pages_used ; i++)
+		__free_page(extra_pages[i]);
 	for (i = 0; i < vcnt; i++)
 		flush_dcache_page(bvec[i].bv_page);
 
