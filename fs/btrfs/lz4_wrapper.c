@@ -692,30 +692,32 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 		return -EIO;
 
 	tot_len = read_compress_length(data_in);
+	data_in += LZ4_LEN;
 	if (tot_len < 128 * 1024) {
-		data_in += LZ4_LEN;
-		in_len = read_compress_length(data_in);
-		data_in += LZ4_LEN;
-
-		out_len = LZ4_uncompress_unknownOutputSize(data_in, workspace->buf,
+		in_len = tot_len;
+		ret = LZ4_uncompress_unknownOutputSize(data_in, workspace->buf,
 				in_len, LZ4_CHUNK_SIZE);
+		out_len = ret;
+		if (ret >= 0)
+			ret = 0;
 	} else {
 		if (tot_len >> 30 != 1) {
 			printk(KERN_ERR "btrfs: lz4 unknown container version found\n");
 			return -EIO;
 		}
+		in_len = tot_len & ((1 << 30) - 1);
+		out_len = read_compress_length(data_in);
+		data_in += LZ4_LEN;
 		/* TODO: hdr? */
-		in_len = get_unaligned_le32(data_in + sizeof(u32));
-		out_len = LZ4_uncompress(data_in, workspace->buf, in_len);
+		ret = LZ4_uncompress(data_in, workspace->buf, out_len);
+		if (ret == in_len)
+			ret = 0;
+		else if (ret >= 0)
+			ret = -1;
 	}
 
-	if (out_len < 0) {
+	if (ret < 0) {
 		printk(KERN_WARNING "btrfs: lz4 decompress failed\n");
-		ret = -1;
-		goto out;
-	}
-
-	if (out_len < start_byte) {
 		ret = -1;
 		goto out;
 	}
