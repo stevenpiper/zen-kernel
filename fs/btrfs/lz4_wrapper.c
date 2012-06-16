@@ -685,17 +685,24 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 	size_t out_len;
 	size_t tot_len;
 	int ret = 0;
-	char *kaddr;
+	char *kaddr = NULL;
 	unsigned long bytes;
 
 	if (srclen < LZ4_LEN)
 		return -EIO;
 
+	kaddr = kmap_atomic(dest_page);
+	if (!kaddr) {
+		printk(KERN_ERR "btrfs: kmap_atomic failed in lz4_decompress\n");
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	tot_len = read_compress_length(data_in);
 	data_in += LZ4_LEN;
 	if (tot_len < 128 * 1024) {
 		in_len = tot_len;
-		ret = LZ4_uncompress_unknownOutputSize(data_in, workspace->buf,
+		ret = LZ4_uncompress_unknownOutputSize(data_in, kaddr,
 				in_len, LZ4_CHUNK_SIZE);
 		out_len = ret;
 		if (ret >= 0)
@@ -709,7 +716,7 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 		out_len = read_compress_length(data_in);
 		data_in += LZ4_LEN;
 		/* TODO: hdr? */
-		ret = LZ4_uncompress(data_in, workspace->buf, out_len);
+		ret = LZ4_uncompress(data_in, kaddr, out_len);
 		if (ret == in_len)
 			ret = 0;
 		else if (ret >= 0)
@@ -722,12 +729,14 @@ static int lz4_decompress(struct list_head *ws, unsigned char *data_in,
 		goto out;
 	}
 
-	bytes = min_t(unsigned long, destlen, out_len - start_byte);
+	if (start_byte) {
+		bytes = min_t(unsigned long, destlen, out_len - start_byte);
+		memmove(kaddr, kaddr + start_byte, bytes);
+	}
 
-	kaddr = kmap_atomic(dest_page);
-	memcpy(kaddr, workspace->buf + start_byte, bytes);
-	kunmap_atomic(kaddr);
 out:
+	if (kaddr)
+		kunmap_atomic(kaddr);
 	return ret;
 }
 
