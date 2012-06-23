@@ -1703,8 +1703,6 @@
 #define   BACKLIGHT_MODULATION_FREQ_SHIFT		(17)
 #define BLC_PWM_CTL2		0x61250 /* 965+ only */
 #define   BLM_COMBINATION_MODE (1 << 30)
-#define   BLM_PIPE_SELECT_IVB (3 << 29)
-#define   BLM_PIPE(pipe) ((pipe) << 29)
 /*
  * This is the most significant 15 bits of the number of backlight cycles in a
  * complete cycle of the modulated backlight control.
