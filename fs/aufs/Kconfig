@@ -1,5 +1,5 @@
 config AUFS_FS
-	bool "Aufs (Advanced multi layered unification filesystem) support"
+	tristate "Aufs (Advanced multi layered unification filesystem) support"
 	help
 	Aufs is a stackable unification filesystem such as Unionfs,
 	which unifies several directories and provides a merged single
@@ -53,6 +53,7 @@ config AUFS_SBILIST
 
 config AUFS_HNOTIFY
 	bool "Detect direct branch access (bypassing aufs)"
+	depends on !AUFS_FS=m
 	help
 	If you want to modify files on branches directly, eg. bypassing aufs,
 	and want aufs to detect the changes of them fully, then enable this
