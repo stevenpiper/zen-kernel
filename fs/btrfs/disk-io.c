@@ -2247,9 +2247,9 @@ int open_ctree(struct super_block *sb,
 	if (tree_root->fs_info->compress_type == BTRFS_COMPRESS_LZO)
 		features |= BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO;
 	if (tree_root->fs_info->compress_type == BTRFS_COMPRESS_LZ4)
-		features |= BTRFS_FEATURE_INCOMPAT_COMPRESSION_LZ4;
+		features |= BTRFS_FEATURE_INCOMPAT_COMPRESS_LZ4;
 	if (tree_root->fs_info->compress_type == BTRFS_COMPRESS_LZ4HC)
-		features |= BTRFS_FEATURE_INCOMPAT_COMPRESSION_LZ4;
+		features |= BTRFS_FEATURE_INCOMPAT_COMPRESS_LZ4;
 
 	/*
 	 * flag our filesystem as having big metadata blocks if
