@@ -1,6 +1,6 @@
 VERSION = 3
 PATCHLEVEL = 8
-SUBLEVEL = 10
+SUBLEVEL = 11
 EXTRAVERSION = -zen
 NAME = Stochastic Salmon
 
